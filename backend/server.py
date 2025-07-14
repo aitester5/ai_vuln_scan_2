@@ -406,16 +406,73 @@ async def create_scan(scan_request: ScanRequest):
         print(f"❌ Error in create_scan: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_obj = StatusCheck(client_name=input.client_name)
-    query = status_checks_table.insert().values(
-        id=status_obj.id,
-        client_name=status_obj.client_name,
-        timestamp=status_obj.timestamp
-    )
-    await database.execute(query)
-    return status_obj
+@api_router.websocket("/ws/scan/{session_id}")
+async def websocket_scan(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for real-time scan execution"""
+    await manager.connect(websocket)
+    try:
+        # Get session from database
+        query = scan_sessions_table.select().where(scan_sessions_table.c.id == session_id)
+        result = await database.fetch_one(query)
+        
+        if not result:
+            await manager.send_personal_message("❌ Session not found", websocket)
+            return
+
+        session_dict = dict(result)
+        session_dict['probes'] = json.loads(session_dict['probes'])
+
+        # Update session status
+        update_query = scan_sessions_table.update().where(
+            scan_sessions_table.c.id == session_id
+        ).values(status="running")
+        await database.execute(update_query)
+
+        # Run the scan based on tool type
+        if session_dict["tool"] == "garak":
+            success, error = await run_garak_scan(
+                session_dict["environment"],
+                session_dict["model_name"],
+                session_dict["probes"],
+                websocket
+            )
+        elif session_dict["tool"] == "promptmap":
+            success, error = await run_promptmap_scan(
+                session_dict["environment"],
+                session_dict["model_name"],
+                websocket
+            )
+        else:
+            success, error = False, f"Unknown tool: {session_dict['tool']}"
+
+        # Update session status
+        status = "completed" if success else "failed"
+        update_values = {
+            "status": status,
+            "completed_at": datetime.utcnow()
+        }
+        if error:
+            update_values["error_message"] = error
+
+        update_query = scan_sessions_table.update().where(
+            scan_sessions_table.c.id == session_id
+        ).values(**update_values)
+        await database.execute(update_query)
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        # Update session status to failed
+        update_query = scan_sessions_table.update().where(
+            scan_sessions_table.c.id == session_id
+        ).values(status="failed", error_message="WebSocket disconnected")
+        await database.execute(update_query)
+    except Exception as e:
+        await manager.send_personal_message(f"❌ Error: {str(e)}", websocket)
+        # Update session status to failed
+        update_query = scan_sessions_table.update().where(
+            scan_sessions_table.c.id == session_id
+        ).values(status="failed", error_message=str(e))
+        await database.execute(update_query)
 
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():

@@ -474,17 +474,6 @@ async def websocket_scan(websocket: WebSocket, session_id: str):
         ).values(status="failed", error_message=str(e))
         await database.execute(update_query)
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_obj = StatusCheck(client_name=input.client_name)
-    query = status_checks_table.insert().values(
-        id=status_obj.id,
-        client_name=status_obj.client_name,
-        timestamp=status_obj.timestamp
-    )
-    await database.execute(query)
-    return status_obj
-
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
     query = status_checks_table.select()
@@ -502,15 +491,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database connection events
-@app.on_event("startup")
-async def startup():
-    await database.connect()
-
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -518,6 +498,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
